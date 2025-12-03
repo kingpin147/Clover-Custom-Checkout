@@ -1,0 +1,79 @@
+// backend/DIM_API.jsw
+import { fetch } from 'wix-fetch';
+
+export async function lookupInmateByDIN(din) {
+  console.log("lookupInmateByDIN called with DIN:", din);
+
+  const dinRegex = /^\d{2}[A-Za-z]\d{4}$/i;
+  if (!din || typeof din !== 'string') throw new Error('DIN is required');
+  const cleanDin = din.trim().toUpperCase();
+  if (!dinRegex.test(cleanDin)) throw new Error('Invalid DIN format. Example: 24A0101');
+
+  const url = `https://lsm-app-2-3bf4c5acef1a.herokuapp.com/api/inmate/${cleanDin}`;
+  console.log("Fetching:", url);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Wix-Velo-Inmate-Lookup/1.0'
+      }
+    });
+
+    if (!response.ok) {
+      if (response.status === 404) throw new Error('Inmate not found with this DIN');
+      if (response.status === 429) throw new Error('Too many requests. Try again later.');
+      throw new Error(`Server error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.error === true) throw new Error(data.message || 'Unknown error');
+
+    const inmate = data.data || data;  // inmate data is inside .data
+    const addr = inmate.facility_data?.address || {};
+    const facilityFullName = inmate.facility_data?.name || inmate.facility || "Unknown Facility";
+
+    // Build street address
+    const streetParts = [
+      (addr.address_line1 || '').trim(),
+      (addr.address_line2 || '').trim()
+    ].filter(Boolean);
+
+    const street = streetParts.length > 0 ? streetParts.join(', ') : "Address not available";
+    const addressLine = `${facilityFullName}\n${street}`.trim();
+
+    const result = {
+      success: true,
+      din: cleanDin,
+
+      // Required address fields
+      country: "US",
+      city: addr.city || "",
+      subdivision: addr.state || "",
+      postalCode: addr.zip || "",
+      addressLine: addressLine,
+
+      // Clean extra fields you want
+      inmateName: flipName(inmate.name || ""),
+      facilityName: facilityFullName,
+      status: inmate.status || "Unknown"   // Correct source: inmate.status
+    };
+
+    console.log("Final result returned:", result);
+    return result;
+
+  } catch (err) {
+    console.error("lookupInmateByDIN failed:", err.message);
+    throw err;
+  }
+}
+
+// Helper: "LAST, FIRST M" → "First Last"
+function flipName(nameStr) {
+  if (!nameStr) return '';
+  const parts = nameStr.split(',').map(p => p.trim());
+  if (parts.length < 2) return nameStr.trim();
+  const firstName = parts[1].split(' ')[0];  // Ignore middle initial
+  const lastName = parts[0];
+  return `${firstName} ${lastName}`.trim();
+}

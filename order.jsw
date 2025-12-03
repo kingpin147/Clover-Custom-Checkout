@@ -1,0 +1,40 @@
+import { orders, orderTransactions } from 'wix-ecom-backend';
+import wixData from 'wix-data';
+export async function createMyOrder(order, options) {
+    try {
+        const result = await orders.createOrder(order, options);
+        return result;
+    } catch (error) {
+        console.error("Order creation failed:", error);
+        logErrorToDB("order Creation", error)
+        throw error;
+        
+    }
+}
+
+export async function updateMyOrderPaymentStatus(identifiers) {
+    try {
+        const result = await orderTransactions.updatePaymentStatus(identifiers, {
+            status: identifiers.status
+        });
+        return result;
+    } catch (error) {
+        console.error("Failed to update order payment status:", error);
+        logErrorToDB("order transaction", error)
+        throw error;
+    }
+}
+
+async function logErrorToDB(location, error) {
+    try {
+        await wixData.insert("ErrorLogs", {
+            location,
+            message: error.message || String(error),
+            stack: error.stack || null,
+            timestamp: new Date()
+        });
+    } catch (loggingError) {
+        console.error("Failed to log error to DB:", loggingError);
+        
+    }
+}
