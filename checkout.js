@@ -1,4 +1,4 @@
-import { myGetCurrentCartFunction, myGetCheckoutFunction } from 'backend/currentCart.web';
+import { myGetCurrentCartFunction, myGetCheckoutFunction, createMyCheckout, updateMyCheckout } from 'backend/currentCart.web';
 import { createMyOrder, updateMyOrderPaymentStatus } from 'backend/order.web';
 import { createMyPayment } from 'backend/wixPay.web';
 import wixPay from "wix-pay";
@@ -12,18 +12,21 @@ let country = null,
     subdivision = null,
     postalCode = null,
     addressLine = null;
+let grandTotal = 0;
+
+// Session-persisted checkout ID (cleared on page refresh or cart change)
+let sessionCheckoutId = null;
 
 $w.onReady(async () => {
     $w('#inmateFacility').collapse();
     $w('#inmateFacility').disable();
     $w('#orderSummary').collapse();
-    // const checkoutId = await myCreateCheckoutFromCurrentCartFunction();
-    // console.log(checkoutId);
     await loadCartAndBind();
 
     // Listen for cart changes (quantity, remove, address update, etc.)
     wixEcomFrontend.onCartChange(async () => {
-        console.log("Cart changed — refreshing...");
+        console.log("Cart changed — refreshing and clearing session checkout...");
+        sessionCheckoutId = null; // Clear checkout on cart change
         await loadCartAndBind();
     });
 });
@@ -45,14 +48,28 @@ async function loadCartAndBind() {
 
         items = cart.lineItems;
 
-        // === GET THE TRUTH: Checkout object (has correct shipping after address) ===
-        let checkout;
-        try {
-            checkout = await myGetCheckoutFunction(cart.checkoutId);
-            console.log("Checkout (with accurate shipping):", checkout);
-        } catch (err) {
-            console.warn("Could not fetch checkout, will use cart fallback", err);
-            checkout = null;
+        // === GET CHECKOUT: Use session checkout or create/get from cart ===
+        let checkout = null;
+
+        // Try to get checkout using sessionCheckoutId (if we created one) or cart.checkoutId
+        const checkoutIdToUse = sessionCheckoutId || cart.checkoutId;
+
+        if (checkoutIdToUse) {
+            try {
+                checkout = await myGetCheckoutFunction(checkoutIdToUse);
+                console.log("Checkout retrieved (with accurate shipping):", checkout);
+
+                // Update sessionCheckoutId if we got it from cart
+                if (!sessionCheckoutId && cart.checkoutId) {
+                    sessionCheckoutId = cart.checkoutId;
+                }
+            } catch (err) {
+                console.warn("Could not fetch checkout, will calculate without shipping", err);
+                checkout = null;
+                sessionCheckoutId = null; // Clear invalid checkout ID
+            }
+        } else {
+            console.log("No checkoutId available yet - will create after inmate lookup");
         }
 
         // === Extract values — PRIORITY: checkout > cart ===
@@ -68,18 +85,16 @@ async function loadCartAndBind() {
         if (checkout?.shippingInfo?.selectedCarrierServiceOption?.cost?.price?.amount) {
             shippingCost = parseFloat(checkout.shippingInfo.selectedCarrierServiceOption.cost.price.amount);
             shippingTitle = checkout.shippingInfo.selectedCarrierServiceOption.title || shippingTitle;
+            console.log("shipping cost", shippingCost);
         } else if (checkout?.priceSummary?.shipping?.amount) {
             shippingCost = parseFloat(checkout.priceSummary.shipping.amount);
+            console.log("shipping cost", shippingCost);
         }
 
         // Use checkout total if available — this is the source of truth
-        let grandTotal = subtotalAmount + shippingCost; // default fallback
+        grandTotal = subtotalAmount + shippingCost;
 
-        if (checkout?.priceSummary?.total?.amount) {
-            grandTotal = parseFloat(checkout.priceSummary.total.amount);
-        } else if (checkout?.payNow?.total?.amount) {
-            grandTotal = parseFloat(checkout.payNow.total.amount);
-        }
+
         $w('#subTotal').text = `${currencySymbol}${subtotalAmount.toFixed(2)}`;
         $w('#deliveryAmount').text = `${currencySymbol}${shippingCost.toFixed(2)} (${shippingTitle})`;
         $w('#grandTotal').text = `${currencySymbol}${grandTotal.toFixed(2)}`;
@@ -101,8 +116,168 @@ async function loadCartAndBind() {
             $item('#productPrice').text = itemData.productPrice;
         });
 
-        // === PAYMENT BUTTON CLICK ===
-       $w('#paymentButton').onClick(async () => {
+    } catch (err) {
+        console.error("Failed to load cart:", err);
+        await logErrorToDB("loadCartAndBind", err);
+        $w('#orderSummary').collapse();
+        $w('#paymentButton').disable();
+    }
+}
+
+// === Inmate Search ===
+$w('#search').onClick(async () => {
+    const din = $w('#dinNumber').value?.trim();
+    if (!din) return console.log("Enter DIN number");
+
+    $w('#search').label = "Searching...";
+    $w('#search').disable();
+
+    try {
+        const result = await lookupInmateByDIN(din);
+        if (result.status == "RELEASED") {
+            $w('#custody').expand();
+            $w('#email').collapse();
+            $w('#phoneNumber').collapse();
+            $w('#paymentButton').collapse();
+            $w('#firstName').collapse();
+            $w('#lastName').collapse();
+            $w('#inmateFacility').collapse();
+            $w('#fullAddress').collapse();
+            return;
+
+        }
+        $w('#custody').collapse();
+        const firstName = result.inmateName?.split(' ')[0] || '';
+        const lastName = result.inmateName?.split(' ').slice(1).join(' ') || '';
+        const facilityName = result.facilityName || "Unknown Facility";
+        addressLine = result.addressLine || result.facilityAddress;
+
+        // Extract address parts
+        country = "US";
+        city = result.city;
+        console.log(city);
+        subdivision = result.subdivision;
+        console.log(subdivision);
+        postalCode = result.postalCode;
+        console.log(postalCode);
+
+        // Populate form
+        $w('#firstName').value = firstName;
+        $w('#lastName').value = `${lastName}, DIN #${result.din}`;
+        $w('#inmateFacility').value = facilityName;
+        $w('#fullAddress').value = addressLine;
+
+        // Disable inmate fields
+        ['#firstName', '#lastName', '#inmateFacility', '#fullAddress'].forEach(id => {
+            $w(id).disable();
+            $w(id).expand();
+        });
+
+        // Enable buyer fields
+        $w('#email').enable();
+        $w('#email').expand();
+        $w('#phoneNumber').enable();
+        $w('#phoneNumber').expand();
+        $w('#paymentButton').expand();
+
+        // Create checkout with shipping address for accurate shipping calculation
+        await createOrUpdateCheckout();
+        await loadCartAndBind();
+
+    } catch (err) {
+        console.error("Inmate lookup failed:", err);
+        console.log("Inmate not found or server error.");
+        $w('#custody').text = "Inmate not found or server error. Try again with correct DIN Number";
+        $w('#custody').expand();
+    } finally {
+        $w('#search').label = "Search";
+        $w('#search').enable();
+    }
+});
+
+// === Create or Update Checkout with Shipping Address ===
+async function createOrUpdateCheckout() {
+    try {
+        const cart = await myGetCurrentCartFunction();
+
+        if (!cart || !cart.lineItems || cart.lineItems.length === 0) {
+            console.log("Cart is empty, cannot create checkout");
+            return;
+        }
+
+        // Prepare line items for checkout creation
+        const lineItems = cart.lineItems.map((item, index) => ({
+            quantity: item.quantity,
+            catalogReference: item.catalogReference,
+            _id: item._id || `item_${Date.now()}_${index}`
+        }));
+
+        const checkoutOptions = {
+            lineItems,
+            channelType: "WEB",
+            checkoutInfo: {
+                shippingInfo: {
+                    shippingDestination: {
+                        address: {
+                            country,
+                            subdivision,
+                            city,
+                            postalCode,
+                            addressLine1: addressLine
+                        },
+                        contactDetails: {
+                            firstName: $w('#firstName').value?.trim() || "Inmate",
+                            lastName: $w('#lastName').value?.trim() || "Recipient"
+                        }
+                    }
+                },
+                buyerInfo: {
+                    email: $w('#email').value?.trim() || "buyer@example.com"
+                }
+            }
+        };
+
+        let checkout;
+
+        if (sessionCheckoutId) {
+            // Update existing checkout with new shipping info
+            console.log("Updating existing checkout with shipping address...");
+            checkout = await updateMyCheckout(
+                sessionCheckoutId,
+                checkoutOptions.checkoutInfo,
+                {}
+            );
+        } else {
+            // Create new checkout
+            console.log("Creating new checkout with shipping address...");
+            checkout = await createMyCheckout(checkoutOptions);
+            sessionCheckoutId = checkout._id;
+        }
+
+        console.log("Checkout ready with shipping:", checkout);
+        return checkout;
+
+    } catch (err) {
+        console.error("Failed to create/update checkout:", err);
+        await logErrorToDB("createOrUpdateCheckout", err);
+    }
+}
+
+// Error logging
+async function logErrorToDB(location, error) {
+    try {
+        await wixData.insert("ErrorLogs", {
+            location,
+            message: error.message || String(error),
+            stack: error.stack,
+            timestamp: new Date()
+        });
+    } catch (e) {
+        console.error("Failed to log error", e);
+    }
+}
+
+$w('#paymentButton').onClick(async () => {
     if (grandTotal <= 0) {
         console.log("Total is zero. Cannot proceed.");
         return;
@@ -114,9 +289,14 @@ async function loadCartAndBind() {
     }
 
     try {
-        // 1. Get fresh data
+        // 1. Get fresh data - use sessionCheckoutId instead of cart.checkoutId
         const latestCart = await myGetCurrentCartFunction();
-        const latestCheckout = await myGetCheckoutFunction(latestCart.checkoutId);
+
+        if (!sessionCheckoutId) {
+            throw new Error("No checkout available. Please search for inmate first.");
+        }
+
+        const latestCheckout = await myGetCheckoutFunction(sessionCheckoutId);
 
         if (!latestCheckout?.priceSummary?.total?.amount) {
             throw new Error("Checkout not ready or missing price summary");
@@ -128,7 +308,7 @@ async function loadCartAndBind() {
             : parseFloat(latestCheckout.priceSummary.shipping?.amount || 0);
 
         const shippingTitle = latestCheckout.shippingInfo?.selectedCarrierServiceOption?.title || "Standard Shipping";
-        const finalTotal = parseFloat(latestCheckout.priceSummary.total.amount);
+        const finalTotal = parseFloat(grandTotal);
 
         // 3. PAYMENT ITEMS — CORRECT (lineItemPrice.amount already includes quantity)
         const paymentItems = latestCart.lineItems.map(item => ({
@@ -230,96 +410,4 @@ async function loadCartAndBind() {
             $w("#errorMessage").expand();
         }
     }
-
 });
-    } catch (err) {
-        console.error("Failed to load cart:", err);
-        await logErrorToDB("loadCartAndBind", err);
-        $w('#orderSummary').collapse();
-        $w('#paymentButton').disable();
-    }
-}
-
-// === Inmate Search ===
-$w('#search').onClick(async () => {
-    const din = $w('#dinNumber').value?.trim();
-    if (!din) return console.log("Enter DIN number");
-
-    $w('#search').label = "Searching...";
-    $w('#search').disable();
-
-    try {
-        const result = await lookupInmateByDIN(din);
-        if (result.status == "RELEASED") {
-            $w('#custody').expand();
-            $w('#email').collapse();
-            $w('#phoneNumber').collapse();
-            $w('#paymentButton').collapse();
-            $w('#firstName').collapse();
-            $w('#lastName').collapse();
-            $w('#inmateFacility').collapse();
-            $w('#fullAddress').collapse();
-            return;
-
-        }
-        $w('#custody').collapse();
-        const firstName = result.inmateName?.split(' ')[0] || '';
-        const lastName = result.inmateName?.split(' ').slice(1).join(' ') || '';
-        const facilityName = result.facilityName || "Unknown Facility";
-        addressLine = result.addressLine || result.facilityAddress;
-
-        // Extract address parts
-        country = "US";
-        city = result.city;
-        console.log(city);
-        subdivision = result.subdivision;
-        console.log(subdivision);
-        postalCode = result.postalCode;
-        console.log(postalCode);
-
-        // Populate form
-        $w('#firstName').value = firstName;
-        $w('#lastName').value = `${lastName}, DIN #${result.din}`;
-        $w('#inmateFacility').value = facilityName;
-        $w('#fullAddress').value = addressLine;
-
-        // Disable inmate fields
-        ['#firstName', '#lastName', '#inmateFacility', '#fullAddress'].forEach(id => {
-            $w(id).disable();
-            $w(id).expand();
-        });
-
-        // Enable buyer fields
-        $w('#email').enable();
-        $w('#email').expand();
-        $w('#phoneNumber').enable();
-        $w('#phoneNumber').expand();
-        $w('#paymentButton').expand();
-
-        // Trigger cart refresh with shipping address (this enables shipping calculation)
-        await loadCartAndBind();
-
-    } catch (err) {
-        console.error("Inmate lookup failed:", err);
-        console.log("Inmate not found or server error.");
-        $w('#custody').text= "Inmate not found or server error. Try again with correct DIN Number";
-        $w('#custody').expand();
-    } finally {
-        $w('#search').label = "Search";
-        $w('#search').enable();
-    }
-});
-
-// Error logging
-async function logErrorToDB(location, error) {
-    try {
-        await wixData.insert("ErrorLogs", {
-            location,
-            message: error.message || String(error),
-            stack: error.stack,
-            timestamp: new Date()
-        });
-    } catch (e) {
-        console.error("Failed to log error", e);
-    }
-}

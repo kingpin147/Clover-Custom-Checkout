@@ -1,5 +1,22 @@
 // backend/DIM_API.jsw
 import { fetch } from 'wix-fetch';
+import wixData from 'wix-data';
+
+/**
+ * Log errors to ErrorLogs database
+ */
+async function logErrorToDB(location, error) {
+  try {
+    await wixData.insert("ErrorLogs", {
+      location,
+      message: error?.message || String(error),
+      stack: error?.stack || null,
+      timestamp: new Date()
+    });
+  } catch (loggingError) {
+    console.error("⚠️ Failed to log error to DB:", loggingError);
+  }
+}
 
 export async function lookupInmateByDIN(din) {
   console.log("lookupInmateByDIN called with DIN:", din);
@@ -64,6 +81,7 @@ export async function lookupInmateByDIN(din) {
 
   } catch (err) {
     console.error("lookupInmateByDIN failed:", err.message);
+    await logErrorToDB("lookupInmateByDIN", err);
     throw err;
   }
 }

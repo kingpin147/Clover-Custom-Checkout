@@ -1,36 +1,37 @@
+<script>
 // Redirect Wix Checkout Buttons to /checkout-1
-// CONSOLIDATED VERSION - No duplicate code
+// PASTE THIS IN: Wix Settings → Custom Code → Body - End
 
 document.addEventListener('DOMContentLoaded', () => {
-
+  
   function redirectCheckoutButtons() {
     // Target all checkout buttons (handles both side-cart and page buttons)
     const buttons = document.querySelectorAll(
       'button[data-hook="CheckoutButtonDataHook.button"], ' +
       'button[data-wix-checkout-button="CheckoutButtonDataHook.button"]'
     );
-
+    
     buttons.forEach(btn => {
       // Skip if already modified
       if (btn.dataset.redirected === 'true') return;
-
+      
       // Mark as processed
       btn.dataset.redirected = 'true';
-
+      
       // Clone button to remove Wix's event listeners
       const newBtn = btn.cloneNode(true);
       newBtn.dataset.redirected = 'true';
-
+      
       // Replace original with clean clone
       btn.replaceWith(newBtn);
-
+      
       // Ensure proper centering styles
       newBtn.style.display = 'flex';
       newBtn.style.justifyContent = 'center';
       newBtn.style.alignItems = 'center';
       newBtn.style.textAlign = 'center';
       newBtn.style.cursor = 'pointer';
-
+      
       // Add redirect on click
       newBtn.addEventListener('click', (e) => {
         e.preventDefault();
@@ -40,22 +41,23 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
   }
-
+  
   // Run immediately
   redirectCheckoutButtons();
-
+  
   // Watch for Wix dynamically adding/updating buttons
   const observer = new MutationObserver(() => {
     redirectCheckoutButtons();
   });
-
+  
   observer.observe(document.body, {
     childList: true,
     subtree: true
   });
-
+  
   // Safety fallback (runs every 1.2 seconds)
   setInterval(redirectCheckoutButtons, 1200);
-
+  
   console.log("✅ Checkout buttons now redirect to /checkout-1");
 });
+</script>
