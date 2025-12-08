@@ -240,12 +240,12 @@ async function createOrUpdateCheckout() {
         let checkout;
 
         if (sessionCheckoutId) {
-            // Update existing checkout with new shipping info
+            // Update existing checkout with new shipping info AND lineItems
             console.log("Updating existing checkout with shipping address...");
             checkout = await updateMyCheckout(
                 sessionCheckoutId,
                 checkoutOptions.checkoutInfo,
-                {}
+                { lineItems } // CRITICAL: Must include lineItems to prevent cart from clearing
             );
         } else {
             // Create new checkout
